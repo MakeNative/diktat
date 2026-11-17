@@ -1,0 +1,19 @@
+[project]
+name = "diktat"
+version = "0.1.0"
+description = "Im Browser sprechen, lokal mit Whisper transkribieren, Text in die Zwischenablage."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "openai-whisper>=20250625",
+    "numpy",
+    "certifi",
+]
+
+[project.scripts]
+diktat = "diktat.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

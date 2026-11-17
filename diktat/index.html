@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diktat</title>
+<style>
+  :root { --bg:#f6f6f4; --fg:#1d1d1b; --muted:#77756f; --card:#fff; --line:#e2e0da; --accent:#d4382c; --ok:#2f7d4f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --fg:#ecebe7; --muted:#9a988f; --card:#20201e; --line:#33322f; --ok:#5cbf85; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:40px 16px; }
+  .bar { display:flex; align-items:center; gap:16px; }
+  #rec { width:72px; height:72px; border-radius:50%; border:2px solid var(--line); background:var(--card); cursor:pointer; display:grid; place-items:center; flex:none; }
+  #rec span { width:28px; height:28px; border-radius:50%; background:var(--accent); transition:all .15s; }
+  #rec.on span { border-radius:6px; width:24px; height:24px; }
+  #rec.on { border-color:var(--accent); animation:pulse 1.4s infinite; }
+  #rec:disabled { opacity:.5; cursor:wait; }
+  @keyframes pulse { 50% { box-shadow:0 0 0 8px color-mix(in srgb, var(--accent) 20%, transparent); } }
+  #status { color:var(--muted); flex:1; }
+  select { font:inherit; padding:4px 8px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--fg); }
+  textarea { width:100%; min-height:200px; margin-top:24px; padding:14px; font:inherit; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--fg); resize:vertical; }
+  .actions { display:flex; justify-content:flex-end; margin-top:8px; }
+  button.copy { font:inherit; padding:6px 16px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--fg); cursor:pointer; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:40px 0 8px; }
+  #history div { padding:10px 12px; border-bottom:1px solid var(--line); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #history div:hover { background:var(--card); }
+  .hint { color:var(--muted); font-size:13px; margin-top:4px; }
+  footer { margin-top:40px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); font-size:13px; }
+  footer button { font:inherit; padding:4px 12px; border-radius:8px; border:1px solid var(--line); background:none; color:var(--muted); cursor:pointer; }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar">
+    <button id="rec" title="Aufnahme starten/stoppen (Leertaste)" disabled><span></span></button>
+    <div id="status">Starte …</div>
+    <select id="lang">
+      <option value="de">Deutsch</option>
+      <option value="en">Englisch</option>
+      <option value="">Automatisch</option>
+    </select>
+  </div>
+  <textarea id="out" placeholder="Hier erscheint der Text."></textarea>
+  <div class="actions"><button class="copy" id="copy">Kopieren</button></div>
+  <h2>Verlauf</h2>
+  <div id="history"></div>
+  <div class="hint">Klick auf einen Eintrag kopiert ihn.</div>
+  <footer>
+    <span>Leertaste halten zum Sprechen, oder kurz tippen zum Starten und Stoppen.</span>
+    <button id="quit">Diktat beenden</button>
+  </footer>
+</main>
+<script>
+const rec = document.getElementById('rec'), status = document.getElementById('status'),
+      out = document.getElementById('out'), lang = document.getElementById('lang'),
+      historyEl = document.getElementById('history');
+let recorder = null, chunks = [], started = 0, timer = null, ready = false;
+const GONE = 'Diktat läuft nicht mehr. Öffne die App „Diktat“ erneut.';
+
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+lang.value = store.get('lang', 'de');
+lang.onchange = () => store.set('lang', lang.value);
+
+function renderHistory() {
+  historyEl.replaceChildren(...store.get('history', []).map(t => {
+    const d = document.createElement('div');
+    d.textContent = t;
+    d.onclick = () => { out.value = t; copy(t); };
+    return d;
+  }));
+}
+
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); status.textContent = 'Kopiert ✓'; return true; }
+  catch { return false; }
+}
+
+async function start() {
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { status.textContent = 'Kein Mikrofonzugriff. Bitte im Browser erlauben.'; return; }
+  chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => chunks.push(e.data);
+  recorder.onstop = () => { stream.getTracks().forEach(t => t.stop()); send(); };
+  recorder.start();
+  started = Date.now();
+  rec.classList.add('on');
+  timer = setInterval(() => status.textContent = `Aufnahme läuft … ${Math.round((Date.now() - started) / 1000)}s`, 250);
+}
+
+function stop() {
+  clearInterval(timer);
+  rec.classList.remove('on');
+  recorder.stop();
+  recorder = null;
+}
+
+// Whisper erwartet 16 kHz mono; der Browser dekodiert und rechnet um, der Server braucht kein ffmpeg.
+async function toPcm(blob) {
+  const buf = await new OfflineAudioContext(1, 1, 16000).decodeAudioData(await blob.arrayBuffer());
+  const pcm = new Float32Array(buf.length);
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < d.length; i++) pcm[i] += d[i] / buf.numberOfChannels;
+  }
+  return pcm;
+}
+
+async function send() {
+  const blob = new Blob(chunks, { type: chunks[0]?.type || 'audio/webm' });
+  rec.disabled = true;
+  status.textContent = 'Transkribiere …';
+  try {
+    let pcm;
+    try { pcm = await toPcm(blob); } catch { throw new Error('Aufnahme zu kurz oder leer.'); }
+    let res;
+    try { res = await fetch(`/transcribe?lang=${lang.value}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: pcm.buffer }); }
+    catch { throw new Error(GONE); }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    out.value = data.text;
+    store.set('history', [data.text, ...store.get('history', [])].slice(0, 30));
+    renderHistory();
+    if (!(await copy(data.text))) status.textContent = `Fertig (${data.seconds}s). Zum Kopieren auf „Kopieren“ klicken.`;
+    else status.textContent = `Fertig (${data.seconds}s), in die Zwischenablage kopiert ✓`;
+  } catch (e) {
+    status.textContent = 'Fehler: ' + e.message;
+  } finally {
+    rec.disabled = false;
+  }
+}
+
+async function waitReady() {
+  try {
+    const s = await (await fetch('/status')).json();
+    const pct = s.progress == null ? '' : ` ${Math.round(s.progress * 100)} %`;
+    if (s.phase === 'ready') {
+      ready = true;
+      rec.disabled = false;
+      status.textContent = 'Bereit. Klick oder Leertaste zum Aufnehmen.';
+      return;
+    }
+    status.textContent = s.message + pct;
+    if (s.phase === 'error') return;
+  } catch { status.textContent = GONE; return; }
+  setTimeout(waitReady, 1000);
+}
+
+rec.onclick = () => { rec.blur(); recorder ? stop() : start(); };
+document.getElementById('quit').onclick = async () => {
+  try { await fetch('/quit', { method: 'POST' }); } catch {}
+  ready = false;
+  rec.disabled = true;
+  status.textContent = 'Diktat ist beendet. Zum Weitermachen die App „Diktat“ öffnen.';
+};
+document.getElementById('copy').onclick = e => { e.currentTarget.blur(); copy(out.value); };
+// Leertaste: kurz tippen schaltet um, länger halten nimmt nur auf, solange sie gedrückt ist.
+let spaceDown = 0, startedBySpace = false;
+const spaceTarget = () => !['TEXTAREA', 'SELECT', 'BUTTON'].includes(document.activeElement.tagName);
+document.addEventListener('keydown', e => {
+  if (e.code !== 'Space' || !spaceTarget()) return;
+  e.preventDefault();
+  if (e.repeat || rec.disabled) return;
+  spaceDown = Date.now();
+  startedBySpace = !recorder;
+  recorder ? stop() : start();
+});
+document.addEventListener('keyup', e => {
+  if (e.code !== 'Space' || !spaceTarget()) return;
+  e.preventDefault();
+  if (startedBySpace && recorder && Date.now() - spaceDown > 400) stop();
+  startedBySpace = false;
+});
+renderHistory();
+waitReady();
+</script>
+</body>
+</html>
